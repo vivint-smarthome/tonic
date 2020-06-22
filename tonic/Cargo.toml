@@ -57,8 +57,8 @@ http-body = "0.3"
 pin-project = "0.4"
 
 # prost
-prost1 = { package = "prost", version = "0.6", optional = true }
-prost-derive = { version = "0.6", optional = true }
+prost1 = { package = "prost", version = "0.6", git = "https://github.com/vivint-smarthome/prost.git", branch = "master", optional = true }
+prost-derive = { version = "0.6", git = "https://github.com/vivint-smarthome/prost.git", branch = "master", optional = true }
 
 # codegen
 async-trait = { version = "0.1.13", optional = true }
