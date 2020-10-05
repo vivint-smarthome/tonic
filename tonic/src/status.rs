@@ -110,6 +110,55 @@ pub enum Code {
     __NonExhaustive,
 }
 
+impl Code {
+    /// Get description of this `Code`.
+    /// ```
+    /// fn make_grpc_request() -> tonic::Code {
+    ///     // ...   
+    ///     tonic::Code::Ok
+    /// }
+    /// let code = make_grpc_request();
+    /// println!("Operation completed. Human readable description: {}", code.description());
+    /// ```
+    /// If you only need description in `println`, `format`, `log` and other
+    /// formatting contexts, you may want to use `Display` impl for `Code`
+    /// instead.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Code::Ok => "The operation completed successfully",
+            Code::Cancelled => "The operation was cancelled",
+            Code::Unknown => "Unknown error",
+            Code::InvalidArgument => "Client specified an invalid argument",
+            Code::DeadlineExceeded => "Deadline expired before operation could complete",
+            Code::NotFound => "Some requested entity was not found",
+            Code::AlreadyExists => "Some entity that we attempted to create already exists",
+            Code::PermissionDenied => {
+                "The caller does not have permission to execute the specified operation"
+            }
+            Code::ResourceExhausted => "Some resource has been exhausted",
+            Code::FailedPrecondition => {
+                "The system is not in a state required for the operation's execution"
+            }
+            Code::Aborted => "The operation was aborted",
+            Code::OutOfRange => "Operation was attempted past the valid range",
+            Code::Unimplemented => "Operation is not implemented or not supported",
+            Code::Internal => "Internal error",
+            Code::Unavailable => "The service is currently unavailable",
+            Code::DataLoss => "Unrecoverable data loss or corruption",
+            Code::Unauthenticated => "The request does not have valid authentication credentials",
+            Code::__NonExhaustive => {
+                unreachable!("__NonExhaustive variant must not be constructed")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Code {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.description(), f)
+    }
+}
+
 // ===== impl Status =====
 
 impl Status {
@@ -425,10 +474,11 @@ impl Status {
         }
 
         if !self.details.is_empty() {
+            let details = base64::encode_config(&self.details[..], base64::STANDARD_NO_PAD);
+
             header_map.insert(
                 GRPC_STATUS_DETAILS_HEADER,
-                HeaderValue::from_maybe_shared(self.details.clone())
-                    .map_err(invalid_header_value_byte)?,
+                HeaderValue::from_maybe_shared(details).map_err(invalid_header_value_byte)?,
             );
         }
 
@@ -452,12 +502,6 @@ impl Status {
         details: Bytes,
         metadata: MetadataMap,
     ) -> Status {
-        let details = if details.is_empty() {
-            details
-        } else {
-            base64::encode_config(&details[..], base64::STANDARD_NO_PAD).into()
-        };
-
         Status {
             code,
             message: message.into(),
@@ -787,5 +831,24 @@ mod tests {
         assert_eq!(Status::unavailable("").code(), Code::Unavailable);
         assert_eq!(Status::data_loss("").code(), Code::DataLoss);
         assert_eq!(Status::unauthenticated("").code(), Code::Unauthenticated);
+    }
+
+    #[test]
+    fn details() {
+        const DETAILS: &[u8] = &[0, 2, 3];
+
+        let status = Status::with_details(Code::Unavailable, "some message", DETAILS.into());
+
+        assert_eq!(&status.details()[..], DETAILS);
+
+        let header_map = status.to_header_map().unwrap();
+
+        let b64_details = base64::encode_config(&DETAILS[..], base64::STANDARD_NO_PAD);
+
+        assert_eq!(header_map[super::GRPC_STATUS_DETAILS_HEADER], b64_details);
+
+        let status = Status::from_header_map(&header_map).unwrap();
+
+        assert_eq!(&status.details()[..], DETAILS);
     }
 }
