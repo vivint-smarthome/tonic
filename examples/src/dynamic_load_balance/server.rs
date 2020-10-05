@@ -1,25 +1,28 @@
 pub mod pb {
-    tonic::include_proto!("/grpc.examples.echo");
+    tonic::include_proto!("grpc.examples.echo");
 }
 
 use futures::Stream;
-use pb::{EchoRequest, EchoResponse};
+use std::net::SocketAddr;
 use std::pin::Pin;
-use tonic::{
-    transport::{Identity, Server, ServerTlsConfig},
-    Request, Response, Status, Streaming,
-};
+use tokio::sync::mpsc;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
+
+use pb::{EchoRequest, EchoResponse};
 
 type EchoResult<T> = Result<Response<T>, Status>;
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + Send + Sync>>;
 
-#[derive(Default)]
-pub struct EchoServer;
+#[derive(Debug)]
+pub struct EchoServer {
+    addr: SocketAddr,
+}
 
 #[tonic::async_trait]
 impl pb::echo_server::Echo for EchoServer {
     async fn unary_echo(&self, request: Request<EchoRequest>) -> EchoResult<EchoResponse> {
-        let message = request.into_inner().message;
+        let message = format!("{} (from {})", request.into_inner().message, self.addr);
+
         Ok(Response::new(EchoResponse { message }))
     }
 
@@ -51,19 +54,29 @@ impl pb::echo_server::Echo for EchoServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cert = tokio::fs::read("examples/data/tls/server.pem").await?;
-    let key = tokio::fs::read("examples/data/tls/server.key").await?;
+    let addrs = ["[::1]:50051", "[::1]:50052"];
 
-    let identity = Identity::from_pem(cert, key);
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let addr = "[::1]:50051".parse().unwrap();
-    let server = EchoServer::default();
+    for addr in &addrs {
+        let addr = addr.parse()?;
+        let tx = tx.clone();
 
-    Server::builder()
-        .tls_config(ServerTlsConfig::new().identity(identity))?
-        .add_service(pb::echo_server::EchoServer::new(server))
-        .serve(addr)
-        .await?;
+        let server = EchoServer { addr };
+        let serve = Server::builder()
+            .add_service(pb::echo_server::EchoServer::new(server))
+            .serve(addr);
+
+        tokio::spawn(async move {
+            if let Err(e) = serve.await {
+                eprintln!("Error = {:?}", e);
+            }
+
+            tx.send(()).unwrap();
+        });
+    }
+
+    rx.recv().await;
 
     Ok(())
 }

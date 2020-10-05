@@ -44,7 +44,7 @@ $ cargo run --bin authentication-client
 $ cargo run --bin authentication-server
 ```
 
-## Load balance
+## Load Balance
 
 ### Client
 
@@ -56,6 +56,20 @@ $ cargo run --bin load-balance-client
 
 ```bash
 $ cargo run --bin load-balance-server
+```
+
+## Dynamic Load Balance
+
+### Client
+
+```bash
+$ cargo run --bin dynamic-load-balance-client
+```
+
+### Server
+
+```bash
+$ cargo run --bin dynamic-load-balance-server
 ```
 
 ## TLS (rustls)
@@ -78,6 +92,14 @@ $ cargo run --bin tls-server
 
 ```bash
 $ cargo run --bin health-server
+```
+
+## Tower Middleware
+
+### Server
+
+```bash
+$ cargo run --bin tower-server
 ```
 
 ## Autoreloading Server

@@ -113,12 +113,12 @@ name = "helloworld-client"
 path = "src/client.rs"
 
 [dependencies]
-tonic = "0.2"
+tonic = "0.3"
 prost = "0.6"
 tokio = { version = "0.2", features = ["macros"] }
 
 [build-dependencies]
-tonic-build = "0.2"
+tonic-build = "0.3"
 ```
 
 We include `tonic-build` as a useful way to incorporate the generation of our client and server gRPC code into the build process of our application. We will setup this build process now:
@@ -244,7 +244,7 @@ If have a gRPC GUI client such as [Bloom RPC] you should be able to send request
 
 Or if you use [grpcurl] then you can simply try send requests like this:
 ```
-$ grpcurl -plaintext -import-path ./proto -proto helloworld.proto -d '{"name": "Tonic"}' localhost:50051 helloworld.Greeter/SayHello
+$ grpcurl -plaintext -import-path ./proto -proto helloworld.proto -d '{"name": "Tonic"}' [::]:50051 helloworld.Greeter/SayHello
 ```
 And receiving responses like this:
 ```

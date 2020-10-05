@@ -9,7 +9,7 @@ pub use endpoint::Endpoint;
 #[cfg(feature = "tls")]
 pub use tls::ClientTlsConfig;
 
-use super::service::{Connection, ServiceList};
+use super::service::{Connection, DynamicServiceStream};
 use crate::{body::BoxBody, client::GrpcService};
 use bytes::Bytes;
 use http::{
@@ -20,13 +20,18 @@ use hyper::client::connect::Connection as HyperConnection;
 use std::{
     fmt,
     future::Future,
+    hash::Hash,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::mpsc::{channel, Sender},
+};
+
 use tower::{
     buffer::{self, Buffer},
-    discover::Discover,
+    discover::{Change, Discover},
     util::{BoxService, Either},
     Service,
 };
@@ -44,7 +49,7 @@ const DEFAULT_BUFFER_SIZE: usize = 1024;
 /// # Multiplexing requests
 ///
 /// Sending a request on a channel requires a `&mut self` and thus can only send
-/// on request in flight. This is intentional and is required to follow the `Service`
+/// one request in flight. This is intentional and is required to follow the `Service`
 /// contract from the `tower` library which this channel implementation is built on
 /// top of.
 ///
@@ -104,17 +109,40 @@ impl Channel {
     /// This creates a [`Channel`] that will load balance accross all the
     /// provided endpoints.
     pub fn balance_list(list: impl Iterator<Item = Endpoint>) -> Self {
-        let list = list.collect::<Vec<_>>();
+        let (channel, mut tx) = Self::balance_channel(DEFAULT_BUFFER_SIZE);
+        list.for_each(|endpoint| {
+            tx.try_send(Change::Insert(endpoint.uri.clone(), endpoint))
+                .unwrap();
+        });
 
-        let buffer_size = list
-            .iter()
-            .next()
-            .and_then(|e| e.buffer_size)
-            .unwrap_or(DEFAULT_BUFFER_SIZE);
+        channel
+    }
 
-        let discover = ServiceList::new(list);
+    /// Balance a list of [`Endpoint`]'s.
+    ///
+    /// This creates a [`Channel`] that will listen to a stream of change events and will add or remove provided endpoints.
+    pub fn balance_channel<K>(capacity: usize) -> (Self, Sender<Change<K, Endpoint>>)
+    where
+        K: Hash + Eq + Send + Clone + 'static,
+    {
+        let (tx, rx) = channel(capacity);
+        let list = DynamicServiceStream::new(rx);
+        (Self::balance(list, DEFAULT_BUFFER_SIZE), tx)
+    }
 
-        Self::balance(discover, buffer_size)
+    pub(crate) fn new<C>(connector: C, endpoint: Endpoint) -> Result<Self, super::Error>
+    where
+        C: Service<Uri> + Send + 'static,
+        C::Error: Into<crate::Error> + Send,
+        C::Future: Unpin + Send,
+        C::Response: AsyncRead + AsyncWrite + HyperConnection + Unpin + Send + 'static,
+    {
+        let buffer_size = endpoint.buffer_size.clone().unwrap_or(DEFAULT_BUFFER_SIZE);
+
+        let svc = Connection::new(connector, endpoint).map_err(super::Error::from_source)?;
+        let svc = Buffer::new(Either::A(svc), buffer_size);
+
+        Ok(Channel { svc })
     }
 
     pub(crate) async fn connect<C>(connector: C, endpoint: Endpoint) -> Result<Self, super::Error>
@@ -126,10 +154,9 @@ impl Channel {
     {
         let buffer_size = endpoint.buffer_size.clone().unwrap_or(DEFAULT_BUFFER_SIZE);
 
-        let svc = Connection::new(connector, endpoint)
+        let svc = Connection::connect(connector, endpoint)
             .await
-            .map_err(|e| super::Error::from_source(e))?;
-
+            .map_err(super::Error::from_source)?;
         let svc = Buffer::new(Either::A(svc), buffer_size);
 
         Ok(Channel { svc })

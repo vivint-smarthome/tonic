@@ -1,3 +1,5 @@
+use crate::body::BoxBody;
+use crate::metadata::MetadataMap;
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderValue};
 use percent_encoding::{percent_decode, percent_encode, AsciiSet, CONTROLS};
@@ -39,6 +41,10 @@ pub struct Status {
     message: String,
     /// Binary opaque details, found in the `grpc-status-details-bin` header.
     details: Bytes,
+    /// Custom metadata, found in the user-defined headers.
+    /// If the metadata contains any headers with names reserved either by the gRPC spec
+    /// or by `Status` fields above, they will be ignored.
+    metadata: MetadataMap,
 }
 
 /// gRPC status codes used by [`Status`].
@@ -104,6 +110,55 @@ pub enum Code {
     __NonExhaustive,
 }
 
+impl Code {
+    /// Get description of this `Code`.
+    /// ```
+    /// fn make_grpc_request() -> tonic::Code {
+    ///     // ...   
+    ///     tonic::Code::Ok
+    /// }
+    /// let code = make_grpc_request();
+    /// println!("Operation completed. Human readable description: {}", code.description());
+    /// ```
+    /// If you only need description in `println`, `format`, `log` and other
+    /// formatting contexts, you may want to use `Display` impl for `Code`
+    /// instead.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Code::Ok => "The operation completed successfully",
+            Code::Cancelled => "The operation was cancelled",
+            Code::Unknown => "Unknown error",
+            Code::InvalidArgument => "Client specified an invalid argument",
+            Code::DeadlineExceeded => "Deadline expired before operation could complete",
+            Code::NotFound => "Some requested entity was not found",
+            Code::AlreadyExists => "Some entity that we attempted to create already exists",
+            Code::PermissionDenied => {
+                "The caller does not have permission to execute the specified operation"
+            }
+            Code::ResourceExhausted => "Some resource has been exhausted",
+            Code::FailedPrecondition => {
+                "The system is not in a state required for the operation's execution"
+            }
+            Code::Aborted => "The operation was aborted",
+            Code::OutOfRange => "Operation was attempted past the valid range",
+            Code::Unimplemented => "Operation is not implemented or not supported",
+            Code::Internal => "Internal error",
+            Code::Unavailable => "The service is currently unavailable",
+            Code::DataLoss => "Unrecoverable data loss or corruption",
+            Code::Unauthenticated => "The request does not have valid authentication credentials",
+            Code::__NonExhaustive => {
+                unreachable!("__NonExhaustive variant must not be constructed")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Code {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.description(), f)
+    }
+}
+
 // ===== impl Status =====
 
 impl Status {
@@ -113,6 +168,7 @@ impl Status {
             code,
             message: message.into(),
             details: Bytes::new(),
+            metadata: MetadataMap::new(),
         }
     }
 
@@ -266,6 +322,7 @@ impl Status {
                     code: status.code,
                     message: status.message.clone(),
                     details: status.details.clone(),
+                    metadata: status.metadata.clone(),
                 });
             }
 
@@ -343,11 +400,18 @@ impl Status {
                 })
                 .map(Bytes::from)
                 .unwrap_or_else(Bytes::new);
+
+            let mut other_headers = header_map.clone();
+            other_headers.remove(GRPC_STATUS_HEADER_CODE);
+            other_headers.remove(GRPC_STATUS_MESSAGE_HEADER);
+            other_headers.remove(GRPC_STATUS_DETAILS_HEADER);
+
             match error_message {
                 Ok(message) => Status {
                     code,
                     message,
                     details,
+                    metadata: MetadataMap::from_headers(other_headers),
                 },
                 Err(err) => {
                     warn!("Error deserializing status message header: {}", err);
@@ -355,6 +419,7 @@ impl Status {
                         code: Code::Unknown,
                         message: format!("Error deserializing status message header: {}", err),
                         details,
+                        metadata: MetadataMap::from_headers(other_headers),
                     }
                 }
             }
@@ -376,13 +441,25 @@ impl Status {
         &self.details
     }
 
+    /// Get a reference to the custom metadata.
+    pub fn metadata(&self) -> &MetadataMap {
+        &self.metadata
+    }
+
+    /// Get a mutable reference to the custom metadata.
+    pub fn metadata_mut(&mut self) -> &mut MetadataMap {
+        &mut self.metadata
+    }
+
     pub(crate) fn to_header_map(&self) -> Result<HeaderMap, Self> {
-        let mut header_map = HeaderMap::with_capacity(3);
+        let mut header_map = HeaderMap::with_capacity(3 + self.metadata.len());
         self.add_header(&mut header_map)?;
         Ok(header_map)
     }
 
     pub(crate) fn add_header(&self, header_map: &mut HeaderMap) -> Result<(), Self> {
+        header_map.extend(self.metadata.clone().into_sanitized_headers());
+
         header_map.insert(GRPC_STATUS_HEADER_CODE, self.code.to_header_value());
 
         if !self.message.is_empty() {
@@ -397,10 +474,11 @@ impl Status {
         }
 
         if !self.details.is_empty() {
+            let details = base64::encode_config(&self.details[..], base64::STANDARD_NO_PAD);
+
             header_map.insert(
                 GRPC_STATUS_DETAILS_HEADER,
-                HeaderValue::from_maybe_shared(self.details.clone())
-                    .map_err(invalid_header_value_byte)?,
+                HeaderValue::from_maybe_shared(details).map_err(invalid_header_value_byte)?,
             );
         }
 
@@ -409,13 +487,41 @@ impl Status {
 
     /// Create a new `Status` with the associated code, message, and binary details field.
     pub fn with_details(code: Code, message: impl Into<String>, details: Bytes) -> Status {
-        let details = base64::encode_config(&details[..], base64::STANDARD_NO_PAD);
+        Self::with_details_and_metadata(code, message, details, MetadataMap::new())
+    }
 
+    /// Create a new `Status` with the associated code, message, and custom metadata
+    pub fn with_metadata(code: Code, message: impl Into<String>, metadata: MetadataMap) -> Status {
+        Self::with_details_and_metadata(code, message, Bytes::new(), metadata)
+    }
+
+    /// Create a new `Status` with the associated code, message, binary details field and custom metadata
+    pub fn with_details_and_metadata(
+        code: Code,
+        message: impl Into<String>,
+        details: Bytes,
+        metadata: MetadataMap,
+    ) -> Status {
         Status {
             code,
             message: message.into(),
-            details: details.into(),
+            details: details,
+            metadata: metadata,
         }
+    }
+
+    /// Build an `http::Response` from the given `Status`.
+    pub fn to_http(self) -> http::Response<BoxBody> {
+        let (mut parts, _body) = http::Response::new(()).into_parts();
+
+        parts.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::header::HeaderValue::from_static("application/grpc"),
+        );
+
+        self.add_header(&mut parts.headers).unwrap();
+
+        http::Response::from_parts(parts, BoxBody::empty())
     }
 }
 
@@ -432,6 +538,10 @@ impl fmt::Debug for Status {
 
         if !self.details.is_empty() {
             builder.field("details", &self.details);
+        }
+
+        if !self.metadata.is_empty() {
+            builder.field("metadata", &self.metadata);
         }
 
         builder.finish()
@@ -470,9 +580,11 @@ impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "grpc-status: {:?}, grpc-message: {:?}",
+            "status: {:?}, message: {:?}, details: {:?}, metadata: {:?}",
             self.code(),
-            self.message()
+            self.message(),
+            self.details(),
+            self.metadata(),
         )
     }
 }
@@ -719,5 +831,24 @@ mod tests {
         assert_eq!(Status::unavailable("").code(), Code::Unavailable);
         assert_eq!(Status::data_loss("").code(), Code::DataLoss);
         assert_eq!(Status::unauthenticated("").code(), Code::Unauthenticated);
+    }
+
+    #[test]
+    fn details() {
+        const DETAILS: &[u8] = &[0, 2, 3];
+
+        let status = Status::with_details(Code::Unavailable, "some message", DETAILS.into());
+
+        assert_eq!(&status.details()[..], DETAILS);
+
+        let header_map = status.to_header_map().unwrap();
+
+        let b64_details = base64::encode_config(&DETAILS[..], base64::STANDARD_NO_PAD);
+
+        assert_eq!(header_map[super::GRPC_STATUS_DETAILS_HEADER], b64_details);
+
+        let status = Status::from_header_map(&header_map).unwrap();
+
+        assert_eq!(&status.details()[..], DETAILS);
     }
 }
